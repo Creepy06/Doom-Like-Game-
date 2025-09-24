@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover" />
+<title>RetroFPS Touch — Doom-like</title>
+<style>
+  html,body{height:100%;margin:0;background:#000;color:#fff;font-family:system-ui,-apple-system,Segoe UI,Roboto;}
+  canvas{display:block;width:100%;height:100vh;background:#000;touch-action:none;}
+  #hud{position:fixed;left:50%;transform:translateX(-50%);top:10px;z-index:60;font-weight:700}
+  #controls{position:fixed;right:10px;bottom:10px;z-index:60;display:flex;flex-direction:column;gap:8px}
+  .btn{background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.06);padding:10px;border-radius:12px;color:#fff;font-weight:800;min-width:76px;text-align:center;user-select:none}
+  #joystick{position:fixed;left:12px;bottom:90px;width:120px;height:120px;border-radius:60px;background:rgba(255,255,255,0.03);display:flex;align-items:center;justify-content:center;z-index:60;touch-action:none}
+  #stick{width:56px;height:56px;border-radius:28px;background:rgba(255,255,255,0.12);}
+  #firebtn{width:84px;height:84px;border-radius:42px;background:rgba(255,0,0,0.18);display:flex;align-items:center;justify-content:center;font-weight:900;user-select:none}
+  #message{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:70;color:#fff;background:rgba(0,0,0,0.7);padding:12px;border-radius:8px;display:none}
+  small{opacity:0.85}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="hud">Vie: <span id="hp">100</span> &nbsp; Munitions: <span id="ammo">50</span></div>
+<div id="joystick"><div id="stick"></div></div>
+<div id="controls"><div id="firebtn" class="btn">TIR</div><button id="reload" class="btn">RECHARGER</button><button id="reset" class="btn">RESTART</button></div>
+<div id="message"></div>
+<script>
+(() => {
+  // Responsive canvas
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  function resize(){ canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
+  addEventListener('resize', resize);
+  resize();
+
+  const hudHP = document.getElementById('hp'), hudAmmo = document.getElementById('ammo'), message = document.getElementById('message');
+
+  // MAP (16x12) — 0 empty, 1 wall, 2 ammo, 3 health, 4 start
+  const MAP = [
+    [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+    [1,4,0,0,0,0,0,0,0,0,0,2,0,0,3,1],
+    [1,0,1,1,1,0,1,1,1,1,0,0,0,1,0,1],
+    [1,0,1,0,1,0,1,0,0,1,0,1,0,0,0,1],
+    [1,0,1,0,0,0,1,0,1,1,0,1,0,2,0,1],
+    [1,0,0,0,0,0,1,0,1,0,0,1,0,0,0,1],
+    [1,0,1,1,1,0,1,0,1,0,0,1,1,1,0,1],
+    [1,0,0,0,1,0,0,0,1,0,0,0,0,0,0,1],
+    [1,0,1,0,1,1,1,0,1,1,1,1,1,1,0,1],
+    [1,0,1,0,0,0,1,0,0,0,0,0,0,1,0,1],
+    [1,0,1,1,1,0,1,1,1,1,1,1,0,1,0,1],
+    [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
+  ];
+  const MAPW = MAP[0].length, MAPH = MAP.length;
+  const TILE = 64;
+
+  // find player start
+  let playerStart = {x: TILE*2.5, y: TILE*2.5};
+  for(let y=0;y<MAPH;y++) for(let x=0;x<MAPW;x++) if(MAP[y][x]===4){ playerStart = {x:(x+0.5)*TILE, y:(y+0.5)*TILE}; MAP[y][x]=0; }
+
+  const player = {x:playerStart.x, y:playerStart.y, ang:0, hp:100, ammo:50};
+
+  // pickups & enemies
+  const pickups = [];
+  const enemies = [];
+  for(let y=0;y<MAPH;y++) for(let x=0;x<MAPW;x++){
+    if(MAP[y][x]===2){ pickups.push({x:(x+0.5)*TILE, y:(y+0.5)*TILE, type:'ammo', collected:false}); MAP[y][x]=0; }
+    if(MAP[y][x]===3){ pickups.push({x:(x+0.5)*TILE, y:(y+0.5)*TILE, type:'health', collected:false}); MAP[y][x]=0; }
+  }
+  // place a few enemies (in empty spots)
+  enemies.push({x: (10.5)*TILE, y:(3.5)*TILE, hp:40, alive:true, speed:28});
+  enemies.push({x: (8.5)*TILE, y:(8.5)*TILE, hp:40, alive:true, speed:22});
+  enemies.push({x: (4.5)*TILE, y:(10.5)*TILE, hp:40, alive:true, speed:24});
+
+  // joystick implementation
+  const joystick = document.getElementById('joystick'), stick = document.getElementById('stick');
+  let joyCenter = {x: joystick.offsetLeft + joystick.offsetWidth/2, y: joystick.offsetTop + joystick.offsetHeight/2};
+  function updateJoyCenter(){ joyCenter = {x: joystick.offsetLeft + joystick.offsetWidth/2, y: joystick.offsetTop + joystick.offsetHeight/2}; }
+  addEventListener('orientationchange', updateJoyCenter);
+  addEventListener('resize', updateJoyCenter);
+  let stickTouchId = null, stickPos = {x:0,y:0};
+  joystick.addEventListener('touchstart', e=>{ e.preventDefault(); stickTouchId = e.changedTouches[0].identifier; updateJoyCenter(); });
+  joystick.addEventListener('touchmove', e=>{ e.preventDefault(); for(const t of e.changedTouches) if(t.identifier===stickTouchId){ const dx=t.clientX-joyCenter.x; const dy=t.clientY-joyCenter.y; const max=40; const mag=Math.min(Math.hypot(dx,dy), max)||1; const nx=dx/mag*mag, ny=dy/mag*mag; stick.style.transform = `translate(${nx}px, ${ny}px)`; stickPos.x = nx/max; stickPos.y = ny/max; }});
+  joystick.addEventListener('touchend', e=>{ for(const t of e.changedTouches) if(t.identifier===stickTouchId){ stickTouchId=null; stickPos={x:0,y:0}; stick.style.transform='translate(0,0)'; }});
+
+  // look on right half
+  let lookTouchId = null, lastLookX = 0;
+  canvas.addEventListener('touchstart', e=>{ for(const t of e.changedTouches){ if(t.clientX > innerWidth/2 && lookTouchId===null){ lookTouchId=t.identifier; lastLookX=t.clientX; } } });
+  canvas.addEventListener('touchmove', e=>{ for(const t of e.changedTouches) if(t.identifier===lookTouchId){ const dx = t.clientX - lastLookX; player.ang += dx * 0.004; lastLookX = t.clientX; } });
+  canvas.addEventListener('touchend', e=>{ for(const t of e.changedTouches) if(t.identifier===lookTouchId) lookTouchId=null; });
+
+  // buttons
+  document.getElementById('firebtn').addEventListener('touchstart', e=>{ e.preventDefault(); shoot(); });
+  document.getElementById('reload').addEventListener('click', ()=>{ player.ammo=50; hudAmmo.textContent=player.ammo; showMessage('Rechargé',800); });
+  document.getElementById('reset').addEventListener('click', resetGame);
+
+  // helper: map collision
+  function isWallAt(px,py){ const mx = Math.floor(px / TILE), my = Math.floor(py / TILE); if(mx<0||mx>=MAPW||my<0||my>=MAPH) return true; return MAP[my][mx] !== 0; }
+
+  // DDA raycaster
+  function castRay(rayAngle){
+    const posX = player.x / TILE, posY = player.y / TILE;
+    const dirX = Math.cos(rayAngle), dirY = Math.sin(rayAngle);
+    let mapX = Math.floor(posX), mapY = Math.floor(posY);
+    const deltaDistX = Math.abs(1/(dirX||1e-9)), deltaDistY = Math.abs(1/(dirY||1e-9));
+    let stepX, stepY, sideDistX, sideDistY;
+    if(dirX<0){ stepX=-1; sideDistX=(posX-mapX)*deltaDistX; } else { stepX=1; sideDistX=(mapX+1-posX)*deltaDistX; }
+    if(dirY<0){ stepY=-1; sideDistY=(posY-mapY)*deltaDistY; } else { stepY=1; sideDistY=(mapY+1-posY)*deltaDistY; }
+    let hit=0, side=0, max=300;
+    while(max-->0){
+      if(sideDistX<sideDistY){ sideDistX+=deltaDistX; mapX+=stepX; side=0; } else { sideDistY+=deltaDistY; mapY+=stepY; side=1; }
+      if(mapX<0||mapX>=MAPW||mapY<0||mapY>=MAPH){ hit=1; break; }
+      if(MAP[mapY][mapX]!==0){ hit = MAP[mapY][mapX]; break; }
+    }
+    let perp;
+    if(side===0) perp = (mapX - posX + (1 - stepX)/2) / (dirX||1e-9);
+    else perp = (mapY - posY + (1 - stepY)/2) / (dirY||1e-9);
+    return {hit, side, perp};
+  }
+
+  // shooting hitscan
+  function shoot(){
+    if(player.ammo<=0){ showMessage('Plus de munitions',700); return; }
+    player.ammo--; hudAmmo.textContent = player.ammo;
+    // check enemies in narrow cone
+    enemies.forEach(e=>{
+      if(!e.alive) return;
+      const dx=e.x-player.x, dy=e.y-player.y, dist=Math.hypot(dx,dy);
+      const ang=Math.atan2(dy,dx);
+      const diff=Math.abs(Math.atan2(Math.sin(ang-player.ang), Math.cos(ang-player.ang)));
+      if(diff < 0.12 && dist < 900){
+        // check lineClear simple
+        if(lineClear(player.x, player.y, e.x, e.y)){
+          e.hp -= 20; if(e.hp<=0){ e.alive=false; showMessage('Ennemi éliminé',900); }
+          else showMessage('Touché',300);
+        }
+      }
+    });
+  }
+
+  function lineClear(x1,y1,x2,y2){
+    const steps = Math.ceil(Math.hypot(x2-x1, y2-y1) / (TILE/8));
+    for(let i=1;i<=steps;i++){ const t=i/steps; const x=x1+(x2-x1)*t; const y=y1+(y2-y1)*t; if(isWallAt(x,y)) return false; }
+    return true;
+  }
+
+  // UI message
+  let msgTimer = null;
+  function showMessage(txt, t=800){ message.textContent = txt; message.style.display='block'; clearTimeout(msgTimer); msgTimer = setTimeout(()=>message.style.display='none', t); }
+
+  // game reset
+  function resetGame(){ player.x = playerStart.x; player.y = playerStart.y; player.ang = 0; player.hp = 100; player.ammo = 50; enemies.forEach(e=>{e.hp=40;e.alive=true}); pickups.forEach(p=>p.collected=false); hudHP.textContent=player.hp; hudAmmo.textContent=player.ammo; showMessage('Restart',700); }
+
+  // render loop (walls + sprites)
+  function render(){
+    ctx.fillStyle = '#111'; ctx.fillRect(0,0,canvas.width,canvas.height);
+    const half = canvas.height/2;
+    ctx.fillStyle = '#333'; ctx.fillRect(0,0,canvas.width,half);
+    ctx.fillStyle = '#0b0b0b'; ctx.fillRect(0,half,canvas.width,half);
+
+    const fov = Math.PI/3;
+    const numRays = Math.min(240, Math.floor(canvas.width/2));
+    const stripW = canvas.width/numRays;
+    const zBuffer = new Array(numRays);
+
+    for(let i=0;i<numRays;i++){
+      const cameraX = 2 * i / numRays - 1;
+      const rayAngle = player.ang + cameraX * (fov/2) * 2;
+      const r = castRay(rayAngle);
+      let perp = Math.max(0.0001, r.perp);
+      const lineHeight = Math.min(canvas.height, Math.floor((TILE / perp) * (canvas.height/2)));
+      const drawStart = Math.floor(half - lineHeight/2), drawEnd = Math.floor(half + lineHeight/2);
+      const shade = Math.max(0, 220 - perp*12);
+      let col = `rgb(${shade},${shade},${shade})`;
+      ctx.fillStyle = col; ctx.fillRect(i*stripW, drawStart, Math.ceil(stripW)+1, drawEnd - drawStart);
+      ctx.fillStyle = 'rgba(0,0,0,0.06)'; ctx.fillRect(i*stripW, drawStart, 1, drawEnd-drawStart);
+      zBuffer[i] = perp * TILE;
+    }
+
+    // sprites (pickups + enemies)
+    const sprites = [];
+    pickups.forEach((p,idx)=>{ if(!p.collected) sprites.push({type:p.type,x:p.x,y:p.y}); });
+    enemies.forEach((e,idx)=>{ if(e.alive) sprites.push({type:'enemy',x:e.x,y:e.y,hp:e.hp}); });
+
+    sprites.sort((a,b)=> (Math.hypot(b.x-player.x,b.y-player.y) - Math.hypot(a.x-player.x,a.y-player.y)));
+
+    sprites.forEach(s=>{
+      const dx = s.x - player.x, dy = s.y - player.y;
+      const dist = Math.hypot(dx,dy);
+      const angTo = Math.atan2(dy,dx);
+      const angNorm = Math.atan2(Math.sin(angTo-player.ang), Math.cos(angTo-player.ang));
+      if(Math.abs(angNorm) > fov/2) return;
+      const screenX = Math.floor((0.5 * (1 + Math.tan(angNorm) / Math.tan(fov/2))) * canvas.width);
+      const sizeOnScreen = Math.min(canvas.width, Math.max(8, Math.floor((TILE*1.2) * (canvas.height / (dist+1)) * 0.8)));
+      const sx = screenX - sizeOnScreen/2, sy = canvas.height/2 - sizeOnScreen/2;
+      const colIdx = Math.floor(screenX / (canvas.width/Math.min(240, Math.floor(canvas.width/2))));
+      if(colIdx>=0 && colIdx<zBuffer.length && (dist*TILE) > zBuffer[colIdx]) return; // occluded
+      if(s.type==='enemy'){
+        ctx.fillStyle = 'rgba(240,80,80,0.95)'; ctx.fillRect(sx,sy,sizeOnScreen,sizeOnScreen);
+        ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(sx,sy-8,sizeOnScreen,6);
+        ctx.fillStyle = 'rgba(0,200,80,0.95)'; ctx.fillRect(sx,sy-8,sizeOnScreen*(s.hp/40),6);
+      } else if(s.type==='ammo'){
+        ctx.fillStyle = 'rgba(200,200,255,0.95)'; ctx.fillRect(sx,sy,sizeOnScreen*0.7,sizeOnScreen*0.7);
+      } else if(s.type==='health'){
+        ctx.fillStyle = 'rgba(200,255,200,0.95)'; ctx.fillRect(sx,sy,sizeOnScreen*0.7,sizeOnScreen*0.7);
+      }
+    });
+
+    // crosshair
+    ctx.strokeStyle='rgba(255,255,255,0.9)'; ctx.beginPath(); ctx.moveTo(canvas.width/2-10,canvas.height/2); ctx.lineTo(canvas.width/2+10,canvas.height/2); ctx.moveTo(canvas.width/2,canvas.height/2-10); ctx.lineTo(canvas.width/2,canvas.height/2+10); ctx.stroke();
+  }
+
+  // update (movement + enemies)
+  let last = performance.now();
+  function update(dt){
+    // movement from joystick
+    const moveSpeed = 120;
+    const rotSpeed = 2.6;
+    let forward = -stickPos.y, strafe = stickPos.x;
+    // keyboard for desktop fallback
+    if(window.keys){ if(keys['w']) forward+=1; if(keys['s']) forward-=1; if(keys['a']) strafe-=1; if(keys['d']) strafe+=1; }
+    // rotation handled by right-side swipe
+
+    const nx = player.x + Math.cos(player.ang) * forward * moveSpeed * dt + Math.cos(player.ang + Math.PI/2) * strafe * moveSpeed * dt;
+    const ny = player.y + Math.sin(player.ang) * forward * moveSpeed * dt + Math.sin(player.ang + Math.PI/2) * strafe * moveSpeed * dt;
+    const radius = 12;
+    if(!isWallAt(nx-radius, player.y) && !isWallAt(nx+radius, player.y)) player.x = nx;
+    if(!isWallAt(player.x, ny-radius) && !isWallAt(player.x, ny+radius)) player.y = ny;
+
+    // pickups
+    pickups.forEach(p=>{ if(!p.collected){ const d = Math.hypot(p.x-player.x, p.y-player.y); if(d < 28){ p.collected = true; if(p.type==='ammo'){ player.ammo = Math.min(99, player.ammo+20); hudAmmo.textContent = player.ammo; showMessage('Munitions +20',900);} else { player.hp = Math.min(100, player.hp+30); hudHP.textContent = Math.floor(player.hp); showMessage('Vie +30',900);} } } });
+
+    // enemies simple AI
+    enemies.forEach(e=>{
+      if(!e.alive) return;
+      const dx = player.x - e.x, dy = player.y - e.y;
+      const dist = Math.hypot(dx,dy);
+      if(dist < 300){
+        const nx = e.x + (dx/dist) * e.speed * dt;
+        const ny = e.y + (dy/dist) * e.speed * dt;
+        if(!isWallAt(nx, ny)){ e.x = nx; e.y = ny; }
+      }
+      if(dist < 36){ player.hp -= 22 * dt; hudHP.textContent = Math.floor(player.hp); if(player.hp<=0){ showMessage('Tu es mort. Restart.',2500); } }
+    });
+  }
+
+  // helpers & game loop
+  function isWallAt(px,py){ const mx=Math.floor(px/TILE), my=Math.floor(py/TILE); if(mx<0||mx>=MAPW||my<0||my>=MAPH) return true; return MAP[my][mx]!==0; }
+
+  let lastFrame = performance.now();
+  function gameloop(t){
+    const dt = Math.min(0.05, (t - lastFrame)/1000);
+    lastFrame = t;
+    update(dt);
+    render();
+    requestAnimationFrame(gameloop);
+  }
+
+  // initialize HUD & start
+  hudHP.textContent = player.hp; hudAmmo.textContent = player.ammo;
+  showMessage('Joystick gauche = déplacer · Glisser droite = tourner · Bouton TIR', 2500);
+  requestAnimationFrame(gameloop);
+
+  // expose shoot for desktop clicks
+  window.shoot = shoot;
+
+})();
+</script>
+</body>
+</html>
