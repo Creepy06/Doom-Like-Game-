@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <title>Doom-Like Retro FPS</title>
+  <style>
+    body, html { margin:0; padding:0; overflow:hidden; background:black; }
+    canvas { display:block; margin:0 auto; background:#000; }
+    #ui { position:fixed; bottom:10px; left:10px; color:white; font-family:sans-serif; }
+  </style>
+</head>
+<body>
+<canvas id="gameCanvas" width="480" height="320"></canvas>
+<div id="ui">🎮 ZQSD = bouger | souris/tap = tourner | clic/tap = tirer</div>
+<script>
+// --- Simple Raycasting Doom-Like ---
+const canvas = document.getElementById("gameCanvas");
+const ctx = canvas.getContext("2d");
+
+// Map simple (1 = mur, 0 = vide, 2 = ennemi)
+const map = [
+  [1,1,1,1,1,1,1,1],
+  [1,0,0,0,0,0,2,1],
+  [1,0,1,0,1,0,0,1],
+  [1,0,0,0,0,0,0,1],
+  [1,2,0,1,0,0,0,1],
+  [1,0,0,0,0,1,0,1],
+  [1,0,0,2,0,0,0,1],
+  [1,1,1,1,1,1,1,1]
+];
+const mapW = map[0].length;
+const mapH = map.length;
+
+// Joueur
+let px = 3.5, py = 3.5, pa = 0;
+let bullets = 5;
+
+// Contrôles
+let keys = {};
+document.addEventListener("keydown", e => keys[e.key.toLowerCase()]=true);
+document.addEventListener("keyup", e => keys[e.key.toLowerCase()]=false);
+canvas.addEventListener("click", shoot);
+
+// Ennemi simple
+let enemies = [];
+for (let y=0;y<mapH;y++){
+  for (let x=0;x<mapW;x++){
+    if (map[y][x]===2){
+      enemies.push({x:x+0.5,y:y+0.5,hp:3});
+      map[y][x]=0;
+    }
+  }
+}
+
+function shoot(){
+  if(bullets>0){
+    bullets--;
+    // collision ennemis
+    for(let e of enemies){
+      let dx=e.x-px, dy=e.y-py;
+      let dist=Math.sqrt(dx*dx+dy*dy);
+      let angle=Math.atan2(dy,dx)-pa;
+      if(Math.abs(angle)<0.2 && dist<5){ e.hp--; }
+    }
+  }
+}
+
+function loop(){
+  update();
+  render();
+  requestAnimationFrame(loop);
+}
+
+function update(){
+  let speed=0.05;
+  if(keys["z"]) { px+=Math.cos(pa)*speed; py+=Math.sin(pa)*speed; }
+  if(keys["s"]) { px-=Math.cos(pa)*speed; py-=Math.sin(pa)*speed; }
+  if(keys["q"]) { pa-=0.05; }
+  if(keys["d"]) { pa+=0.05; }
+}
+
+function render(){
+  ctx.fillStyle="black";
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+  // Raycasting murs
+  for(let r=0;r<canvas.width;r++){
+    let ra = (pa - Math.PI/6) + (r/canvas.width)*(Math.PI/3);
+    let dist=0, hit=false;
+    let rx=px, ry=py;
+    while(!hit && dist<20){
+      rx+=Math.cos(ra)*0.05; ry+=Math.sin(ra)*0.05; dist+=0.05;
+      if(map[Math.floor(ry)][Math.floor(rx)]===1) hit=true;
+    }
+    let h = (canvas.height/(dist))*50;
+    ctx.fillStyle=`rgb(${200-dist*15},${200-dist*15},${200-dist*15})`;
+    ctx.fillRect(r,(canvas.height/2)-h/2,1,h);
+  }
+  // Ennemis
+  for(let e of enemies){
+    if(e.hp>0){
+      let dx=e.x-px, dy=e.y-py;
+      let dist=Math.sqrt(dx*dx+dy*dy);
+      let angle=Math.atan2(dy,dx)-pa;
+      if(angle>-Math.PI/6 && angle<Math.PI/6){
+        let size=200/dist;
+        let sx=canvas.width/2+ (angle/(Math.PI/3))*canvas.width;
+        ctx.fillStyle="red";
+        ctx.fillRect(sx-size/2,canvas.height/2-size/2,size,size);
+      }
+    }
+  }
+  // UI
+  ctx.fillStyle="white";
+  ctx.fillText("Munitions: "+bullets,10,10);
+}
+loop();
+</script>
+</body>
+</html>
